@@ -45,12 +45,12 @@ class Mars(object):
         self.track_train_info_path = osp.join(root, 'info/tracks_train_info.mat')
         self.track_test_info_path = osp.join(root, 'info/tracks_test_info.mat')
         self.query_IDX_path = osp.join(root, 'info/query_IDX.mat')
-        self.attributes_path = osp.join(root, "mars_attributes.csv")
+        # self.attributes_path = osp.join(root, "mars_attributes.csv")
         self._check_before_run()
         # prepare meta data
         train_names = self._get_names(self.train_name_path)
         test_names = self._get_names(self.test_name_path)
-        self.attributes = pd.read_csv(osp.join(self.root, "mars_attr.csv"), encoding="gbk")
+        # self.attributes = pd.read_csv(osp.join(self.root, "mars_attr.csv"), encoding="gbk")
         track_train = loadmat(self.track_train_info_path)['track_train_info'] # numpy.ndarray (8298, 4)
         track_test = loadmat(self.track_test_info_path)['track_test_info'] # numpy.ndarray (12180, 4)
         query_IDX = loadmat(self.query_IDX_path)['query_IDX'].squeeze() # numpy.ndarray (1980,)
@@ -109,8 +109,8 @@ class Mars(object):
             raise RuntimeError("'{}' is not available".format(self.track_test_info_path))
         if not osp.exists(self.query_IDX_path):
             raise RuntimeError("'{}' is not available".format(self.query_IDX_path))
-        if not osp.exists(self.attributes_path):
-            raise RuntimeError("'{}' is not available".format(self.attributes_path))
+        # if not osp.exists(self.attributes_path):
+        #     raise RuntimeError("'{}' is not available".format(self.attributes_path))
 
 
     def _get_names(self, fpath):

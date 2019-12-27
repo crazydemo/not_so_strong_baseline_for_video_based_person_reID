@@ -223,16 +223,14 @@ class VideoBaseline(nn.Module):
         self.neck_feat = neck_feat
         # self.attention_conv = nn.Conv2d(self.in_planes, 1, 3, padding=1)
         # weights_init_kaiming(self.attention_conv)
-        if self.neck == 'no':
-            self.classifier = nn.Linear(self.in_planes, self.num_classes)
-            # self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)     # new add by luo
-            self.classifier.apply(weights_init_classifier)  # new add by luo
-        elif self.neck == 'bnneck':
-            self.bottleneck = nn.BatchNorm1d(self.in_planes)
-            self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)
-            self.bottleneck.bias.requires_grad_(False)  # no shift
-            self.bottleneck.apply(weights_init_kaiming)
-            self.classifier.apply(weights_init_classifier)
+        self.classifier = nn.Linear(self.in_planes, self.num_classes)
+        # self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)     # new add by luo
+        self.classifier.apply(weights_init_classifier)  # new add by luo
+
+        self.bottleneck = nn.BatchNorm1d(self.in_planes)
+        self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)
+        self.bottleneck.bias.requires_grad_(False)  # no shift
+        self.bottleneck.apply(weights_init_kaiming)
 
 
     def forward(self, x):
@@ -240,7 +238,6 @@ class VideoBaseline(nn.Module):
         t = x.size(1)
         x = x.view(b * t, x.size(2), x.size(3), x.size(4))
         global_feat = self.base(x) # (b, 2048, 1, 1)
-
         # a = self.attention_conv(global_feat)
         # a = a.view(b, t, 1, global_feat.size(2), global_feat.size(3))
         # a = torch.sigmoid(a)
@@ -250,24 +247,17 @@ class VideoBaseline(nn.Module):
         # global_feat = global_feat.view(b * t, self.in_planes, global_feat.size(3), global_feat.size(4))
         global_feat= self.gap(global_feat)
         global_feat = global_feat.view(b, t, -1)
-        global_feat = global_feat.permute(0, 2, 1)
-        global_feat = torch.mean(global_feat, 2, keepdim=True)
+        mu = torch.mean(global_feat, 1)
+        feat_for_ce = self.bottleneck(mu)
+        std = torch.std(global_feat, 1)
 
-        if self.neck == 'no':
-            feat = global_feat
-        elif self.neck == 'bnneck':
-            feat = self.bottleneck(global_feat)  # normalize for angular softmax
+        feat = torch.cat((mu, std), -1)
 
-        feat = feat.squeeze(2)
-        global_feat = global_feat.squeeze(2)
         if self.training:
-            cls_score = self.classifier(feat)
-            return cls_score, global_feat  # global feature for triplet loss
+            cls_score = self.classifier(feat_for_ce)
+            return cls_score, feat, mu, std  # global feature for triplet loss
         else:
-            if self.neck_feat == 'after':
-                return feat
-            else:
-                return global_feat
+            return global_feat
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)

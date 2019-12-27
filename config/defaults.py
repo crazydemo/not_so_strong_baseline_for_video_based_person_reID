@@ -37,7 +37,7 @@ _C.MODEL.PRETRAIN_PATH = ''
 _C.MODEL.PRETRAIN_CHOICE = 'imagenet'
 
 # If train with BNNeck, options: 'bnneck' or 'no'
-_C.MODEL.NECK = 'bnneck'
+_C.MODEL.NECK = 'no'
 # If train loss include center loss, options: 'yes' or 'no'. Loss with center loss has different optimizer configuration
 _C.MODEL.IF_WITH_CENTER = 'no'
 # The loss type of metric loss

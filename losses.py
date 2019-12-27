@@ -10,7 +10,7 @@ Shorthands for loss:
 - TripletLoss: htri
 - CenterLoss: cent
 """
-__all__ = ['CrossEntropyLabelSmooth', 'TripletLoss', 'CenterLoss']
+__all__ = ['CrossEntropyLabelSmooth', 'TripletLoss', 'CenterLoss', 'Likelihood']
 
 class CrossEntropyLabelSmooth(nn.Module):
     """Cross entropy loss with label smoothing regularizer.
@@ -43,6 +43,21 @@ class CrossEntropyLabelSmooth(nn.Module):
         targets = (1 - self.epsilon) * targets + self.epsilon / self.num_classes
         loss = (- targets * log_probs).mean(0).sum()
         return loss
+
+class Likelihood(nn.Module):
+    def __init__(self, num_classes, epsilon=1e-6, use_gpu=True):
+        super(Likelihood, self).__init__()
+        self.num_classes = num_classes
+        self.epsilon = epsilon
+        self.use_gpu = use_gpu
+
+    def forward(self, score, label, a=0.0001, lamda=0.001):
+        ALPHA = torch.zeros(score.size()).scatter_(1, label.unsqueeze(1).data.cpu(), 1)
+        max_num = torch.max(ALPHA)
+        K = ALPHA * a +1
+        logits_with_margin = score * K.cuda()
+        likelihood = lamda * torch.mean(torch.sum(-1. * logits_with_margin * ALPHA.cuda(), 1))
+        return likelihood, logits_with_margin
 
 class CenterLoss(nn.Module):
     """Center loss.
