@@ -209,7 +209,7 @@ def train(model, trainloader, xent, tent, lkd, optimizer, use_gpu):
         score = outputs[:,pids]
 
         print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f}), lkd: {:.6f}, acc: {:.3f}, \
-        \n \t\t mu: {:.4f}, std:{:.4f}, prior_mu: {:.4f}, prior_var: {:.4f}, scores: {:.4f}".format(
+        \n \t\t\t\tmu: {:.4f}, std:{:.4f}, prior_mu: {:.4f}, prior_var: {:.4f}, scores: {:.4f}".format(
             batch_idx + 1, len(trainloader), losses.val, losses.avg, xent_losses.val, xent_losses.avg, tent_losses.val,
             tent_losses.avg, likelihood.item(), acc.item(), mu.mean(), std.mean(), prior_mu.mean(), prior_var.mean(), score.mean()))
 

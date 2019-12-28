@@ -242,14 +242,17 @@ class VideoBaseline(nn.Module):
         self.neck_feat = neck_feat
         # self.attention_conv = nn.Conv2d(self.in_planes, 1, 3, padding=1)
         # weights_init_kaiming(self.attention_conv)
-        self.classifier = nn.Linear(self.in_planes, self.num_classes)
-        # self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)     # new add by luo
+
+        self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)     # new add by luo
         self.classifier.apply(weights_init_classifier)  # new add by luo
 
-        self.bottleneck = nn.BatchNorm1d(self.in_planes)
-        self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)
-        self.bottleneck.bias.requires_grad_(False)  # no shift
-        self.bottleneck.apply(weights_init_kaiming)
+        self.bottleneck_mu = nn.BatchNorm1d(self.in_planes)
+        self.bottleneck_mu.bias.requires_grad_(False)  # no shift
+        self.bottleneck_mu.apply(weights_init_kaiming)
+
+        self.bottleneck_std = nn.BatchNorm1d(self.in_planes)
+        self.bottleneck_std.bias.requires_grad_(False)  # no shift
+        self.bottleneck_std.apply(weights_init_kaiming)
 
         self.prior_mu = nn.Parameter(torch.randn(self.num_classes, self.in_planes).cuda())
         nn.init.kaiming_normal_(self.prior_mu, a=0, mode='fan_in')
@@ -272,8 +275,10 @@ class VideoBaseline(nn.Module):
         global_feat= self.gap(global_feat)
         global_feat = global_feat.view(b, t, -1)
         mu = torch.mean(global_feat, 1)
-        feat_for_ce = self.bottleneck(mu)
+        mu_for_ce = self.bottleneck_mu(mu)
         std = torch.std(global_feat, 1)
+        std_for_ce = self.bottleneck_std(std)
+
 
         prior_mu = self.prior_mu
         prior_sigma = self.prior_log_sigma
@@ -281,7 +286,7 @@ class VideoBaseline(nn.Module):
         feat = torch.cat((mu, std), -1)
 
         if self.training:
-            cls_score = -KL_between_multivariate_gaussian(mu, std**2, prior_mu, prior_sigma)
+            cls_score = -KL_between_multivariate_gaussian(mu_for_ce, std_for_ce**2, prior_mu, prior_sigma)
             return cls_score, feat, mu, std, prior_mu, prior_sigma  # global feature for triplet loss
         else:
             return global_feat

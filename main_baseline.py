@@ -193,7 +193,7 @@ def train(model, trainloader, xent, tent, optimizer, use_gpu):
     for batch_idx, (imgs, pids, _) in enumerate(trainloader):
         if use_gpu:
             imgs, pids = imgs.cuda(), pids.cuda()
-        outputs, features, mu, std = model(imgs)
+        outputs, features = model(imgs)
         # combine hard triplet loss with cross entropy loss
 
         xent_loss = xent(outputs, pids)
@@ -208,9 +208,9 @@ def train(model, trainloader, xent, tent, optimizer, use_gpu):
         acc = (outputs.max(1)[1] == pids).float().mean()
         score = outputs[:,pids]
 
-        print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f}), acc: {:.3f}, mu: {:.4f}, std:{:.4f}, scores: {:.4f}".format(
+        print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f}), acc: {:.3f}, scores: {:.4f}".format(
             batch_idx + 1, len(trainloader), losses.val, losses.avg, xent_losses.val, xent_losses.avg, tent_losses.val,
-            tent_losses.avg, acc.item(), mu.mean(), std.mean(), score.mean()))
+            tent_losses.avg, acc.item(), score.mean()))
 
         # attr_losses.update(attr_loss.item(), pids.size(0))
     print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f})".format(

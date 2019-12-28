@@ -3,7 +3,7 @@ MODEL:
   PRETRAIN_PATH: '/home/ivy/.cache/torch/checkpoints/resnet50-19c8e357.pth'
   IF_LABELSMOOTH: 'on'
   IF_WITH_CENTER: 'yes'
-  NECK: 'distribution'
+  NECK: 'bnneck'
   ARCH : 'video_baseline' # NVAN or video_baseline
 
 INPUT:
@@ -62,9 +62,9 @@ TEST:
   RE_RANKING: 'no'
   WEIGHT: "path"
 
-  NECK_FEAT: 'after'
+  NECK_FEAT: 'before'
   FEAT_NORM: 'yes'
 
-OUTPUT_DIR: '/media/ivy/research/not_so_strong_baseline_for_video_based_person_reID/experiment_res/mars/prior_dist'
+OUTPUT_DIR: '/media/ivy/research/not_so_strong_baseline_for_video_based_person_reID/experiment_res/mars/baseline'
 
 
