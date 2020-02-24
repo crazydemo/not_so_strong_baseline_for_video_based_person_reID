@@ -55,7 +55,7 @@ SOLVER:
 
   CHECKPOINT_PERIOD: 40
   LOG_PERIOD: 20
-  EVAL_PERIOD: 40
+  EVAL_PERIOD: 1
 
 TEST:
   SEQS_PER_BATCH: 1
@@ -65,6 +65,6 @@ TEST:
   NECK_FEAT: 'before'
   FEAT_NORM: 'yes'
 
-OUTPUT_DIR: '/media/ivy/research/not_so_strong_baseline_for_video_based_person_reID/experiment_res/mars/baseline'
+OUTPUT_DIR: '/media/ivy/research/not_so_strong_baseline_for_video_based_person_reID/experiment_res/mars/sigma_net'
 
 

@@ -1,9 +1,11 @@
 from __future__ import absolute_import
 
 
-from models.baseline import VideoBaseline
+# from models.baseline import VideoBaseline
 # from models.baseline_dist import VideoBaseline
 # from models.prior_dist import VideoBaseline
+# from models.as_image_sigma_net import VideoBaseline
+from models.sigma_net import  VideoBaseline
 from models.net.models import CNN
 
 __factory = {

@@ -153,6 +153,9 @@ def make_optimizer(cfg, model):
         if "prior_log_sigma" in key:
             lr = 0.01 * cfg.SOLVER.BASE_LR
             weight_decay = 0.
+        if "reduction_sigma" in key:
+            lr = 1. * cfg.SOLVER.BASE_LR
+            weight_decay = 0.005
         params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
     if cfg.SOLVER.OPTIMIZER_NAME == 'SGD':
         optimizer = getattr(torch.optim, cfg.SOLVER.OPTIMIZER_NAME)(params, momentum=cfg.SOLVER.MOMENTUM)

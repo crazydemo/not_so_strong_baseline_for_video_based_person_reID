@@ -26,7 +26,7 @@ from tqdm import tqdm
 from lr_schedulers import WarmupMultiStepLR
 import transforms as T
 import models
-from losses import CrossEntropyLabelSmooth, TripletLoss, TripletLossAttrWeightes, CosineTripletLoss
+from losses import CrossEntropyLabelSmooth, TripletLoss, TripletLossAttrWeightes, CosineTripletLoss, Likelihood
 from utils import AverageMeter, Logger, AttributesMeter, EMA, make_optimizer
 from eval_metrics import evaluate_reranking
 from config import cfg
@@ -141,6 +141,7 @@ def main():
     start_time = time.time()
     xent = CrossEntropyLabelSmooth(num_classes=dataset.num_train_pids)
     tent = TripletLoss(cfg.SOLVER.MARGIN)
+    lkd = Likelihood(num_classes=dataset.num_train_pids)
 
     optimizer = make_optimizer(cfg, model)
 
@@ -158,7 +159,7 @@ def main():
         print("==> Epoch {}/{}".format(epoch + 1, cfg.SOLVER.MAX_EPOCHS))
         print("current lr:", scheduler.get_lr()[0])
 
-        train(model, trainloader, xent, tent, optimizer, use_gpu)
+        train(model, trainloader, xent, tent, lkd, optimizer, use_gpu)
         if cfg.SOLVER.EVAL_PERIOD > 0 and ((epoch + 1) % cfg.SOLVER.EVAL_PERIOD == 0 or (epoch + 1) == cfg.SOLVER.MAX_EPOCHS):
             print("==> Test")
 
@@ -183,24 +184,23 @@ def main():
     print("Finished. Total elapsed time (h:m:s): {}".format(elapsed))
 
 
-def train(model, trainloader, xent, tent, optimizer, use_gpu):
+def train(model, trainloader, xent, tent, lkd, optimizer, use_gpu):
     model.train()
     xent_losses = AverageMeter()
     tent_losses = AverageMeter()
     losses = AverageMeter()
 
-
     for batch_idx, (imgs, pids, _) in enumerate(trainloader):
         if use_gpu:
             imgs, pids = imgs.cuda(), pids.cuda()
-        outputs, features = model(imgs)
+        outputs, features, mu, std, prior_mu, prior_var = model(imgs)
         # combine hard triplet loss with cross entropy loss
-
-        xent_loss = xent(outputs, pids)
+        likelihood, logits_with_margin = lkd(outputs, pids, a=0.0001, lamda=0.001)
+        xent_loss = xent(logits_with_margin, pids)
         tent_loss, _, _ = tent(features, pids)
         xent_losses.update(xent_loss.item(), 1)
         tent_losses.update(tent_loss.item(), 1)
-        loss = xent_loss + tent_loss
+        loss = xent_loss + tent_loss + likelihood
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -208,9 +208,10 @@ def train(model, trainloader, xent, tent, optimizer, use_gpu):
         acc = (outputs.max(1)[1] == pids).float().mean()
         score = outputs[:,pids]
 
-        print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f}), acc: {:.3f}, scores: {:.4f}".format(
+        print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f}), lkd: {:.6f}, acc: {:.3f}, \
+        \n \t\t\t\tmu: {:.4f}, std:{:.4f}, prior_mu: {:.4f}, prior_var: {:.4f}, scores: {:.4f}".format(
             batch_idx + 1, len(trainloader), losses.val, losses.avg, xent_losses.val, xent_losses.avg, tent_losses.val,
-            tent_losses.avg, acc.item(), score.mean()))
+            tent_losses.avg, likelihood.item(), acc.item(), mu.mean(), std.mean(), prior_mu.mean(), prior_var.mean(), score.mean()))
 
         # attr_losses.update(attr_loss.item(), pids.size(0))
     print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f})".format(
@@ -233,9 +234,10 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
             b, n, s, c, h, w = imgs.size() # b ids, each id has n clips, each clip has s frames, channel, height, width
             # print(n)
             assert (b == 1)
-            imgs = imgs.view(b * n, s, c, h, w)
+            imgs = imgs.view(n, s, c, h, w)
 
-            feat_lst = []
+            max_feat_lst = []
+            mu_lst = []
             idx = 0
             feat = imgs
             if n>16:
@@ -246,26 +248,27 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
                     else:
                         end_idx = idx + 16
                     cur_img = imgs[idx:end_idx, :, :, :]
-                    feat = model(cur_img)
+                    cur_img = cur_img.view(1, cur_img.shape[0]*cur_img.shape[1], c, h, w)
+                    max_feat, mu, std = model(cur_img, cnt=0)
+                    max_feat_lst.append(max_feat)
+                    mu_lst.append(mu)
+                    idx = end_idx
 
-                    # feat = torch.mean(feat, 0, keepdim=True)
-                    idx += 16
-                    feat_lst.append(feat)
 
-                if len(feat_lst)>1:
-                    features = torch.cat(feat_lst, 0)
-                else:
-                    features = feat_lst[0]
+                max_feature = torch.cat(max_feat_lst, 0)
+                max_feature = torch.max(max_feature, 0, keepdim=True)[0]
+                _, _, std = model(cur_img, max_feature)
+                mu = torch.cat(mu_lst, 0)
+                mu = torch.mean(mu, 0, keepdim=True)
+
 
             else:
-                features = model(imgs)
-                # features = features.view(n, -1)
+                imgs = imgs.view(1, n * s, c, h, w)
+                _, mu, std = model(imgs, cnt=0)
 
-            # features = features.view(features.shape[0]*features.shape[1], -1)
-            mu = torch.mean(features, 0, keepdim=True)
-            # std = torch.std(features, 0, keepdim=True)
-            # features = torch.cat((mu, std), -1)
-            features = mu.squeeze(0)
+
+            features = torch.cat((mu, std), -1)
+            features = features.squeeze(0)
 
             features = features.data.cpu()
 
@@ -280,7 +283,8 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
             del imgs
             del features
             del feat
-            del feat_lst
+            del max_feat_lst
+            del mu_lst
 
         qf = torch.stack(qf)
         q_pids = np.asarray(q_pids)
@@ -297,9 +301,10 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
             if use_gpu:
                 imgs = imgs.cuda()
             b, n, s, c, h, w = imgs.size()
-            imgs = imgs.view(b * n, s, c, h, w)
-            assert (b == 1)
-            feat_lst = []
+            imgs = imgs.view(n, s, c, h, w)
+
+            max_feat_lst = []
+            mu_lst = []
             idx = 0
             feat = imgs
             if n > 16:
@@ -310,26 +315,25 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
                     else:
                         end_idx = idx + 16
                     cur_img = imgs[idx:end_idx, :, :, :]
-                    feat = model(cur_img)
+                    cur_img = cur_img.view(1, cur_img.shape[0] * cur_img.shape[1], c, h, w)
+                    max_feat, mu, std = model(cur_img, cnt=0)
+                    max_feat_lst.append(max_feat)
+                    mu_lst.append(mu)
+                    idx = end_idx
 
-                    feat = torch.mean(feat, 0, keepdim=True)
-                    idx += 16
-                    feat_lst.append(feat)
+                max_feature = torch.cat(max_feat_lst, 0)
+                max_feature = torch.max(max_feature, 0, keepdim=True)[0]
+                _, _, std = model(cur_img, max_feature)
+                mu = torch.cat(mu_lst, 0)
+                mu = torch.mean(mu, 0, keepdim=True)
 
-                if len(feat_lst) > 1:
-                    features = torch.cat(feat_lst, 0)
-                else:
-                    features = feat_lst[0]
 
             else:
-                features = model(imgs)
-                # features = features.view(n, -1)
+                imgs = imgs.view(1, n * s, c, h, w)
+                _, mu, std = model(imgs, cnt=0)
 
-            # features = features.view(features.shape[0] * features.shape[1], -1)
-            mu = torch.mean(features, 0, keepdim=True)
-            # std = torch.std(features, 0, keepdim=True)
-            # features = torch.cat((mu, std), -1)
-            features = mu.squeeze(0)
+            features = torch.cat((mu, std), -1)
+            features = features.squeeze(0)
 
             features = features.data.cpu()
             g_pids.extend(pids)
@@ -342,7 +346,8 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
             del imgs
             del features
             del feat
-            del feat_lst
+            del max_feat_lst
+            del mu_lst
 
 
         gf = torch.stack(gf)
@@ -363,6 +368,152 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
         else:
             metrics = evaluate_reranking(qf, q_pids, q_camids, gf, g_pids, g_camids, ranks)
         return metrics
+
+
+# def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20]):
+#
+#     with torch.no_grad():
+#         model.eval()
+#         # ema.apply_shadow()
+#         qf, q_pids, q_camids = [], [], []
+#         query_pathes = []
+#         for batch_idx, (imgs, pids, camids, img_path) in enumerate(tqdm(queryloader)):
+#             query_pathes.append(img_path[0])
+#             if use_gpu:
+#                 imgs = imgs.cuda()
+#             b, n, s, c, h, w = imgs.size() # b ids, each id has n clips, each clip has s frames, channel, height, width
+#             # print(n)
+#             assert (b == 1)
+#             imgs = imgs.view(b * n, s, c, h, w)
+#
+#             feat_lst = []
+#             idx = 0
+#             feat = imgs
+#             if n>16:
+#
+#                 while idx < n:
+#                     if idx + 16 > n:
+#                         end_idx = n
+#                     else:
+#                         end_idx = idx + 16
+#                     cur_img = imgs[idx:end_idx, :, :, :]
+#                     feat = model(cur_img)
+#
+#                     # feat = torch.mean(feat, 0, keepdim=True)
+#                     idx += 16
+#                     feat_lst.append(feat)
+#
+#                 if len(feat_lst)>1:
+#                     features = torch.cat(feat_lst, 0)
+#                 else:
+#                     features = feat_lst[0]
+#
+#             else:
+#                 features = model(imgs)
+#                 # features = features.view(n, -1)
+#
+#             # features = features.view(features.shape[0]*features.shape[1], -1)
+#             mu = torch.mean(features, 0, keepdim=True)
+#             # std = torch.std(features, 0, keepdim=True)
+#             # features = torch.cat((mu, std), -1)
+#             features = mu.squeeze(0)
+#
+#             features = features.data.cpu()
+#
+#             q_pids.extend(pids)
+#             q_camids.extend(camids)
+#
+#             qf.append(features)
+#             if batch_idx==950:
+#                 print('here')
+#             if batch_idx==1500:
+#                 print('here')
+#             del imgs
+#             del features
+#             del feat
+#             del feat_lst
+#
+#         qf = torch.stack(qf)
+#         q_pids = np.asarray(q_pids)
+#         q_camids = np.asarray(q_camids)
+#         np.save("query_pathes", query_pathes)
+#
+#
+#         print("Extracted features for query set, obtained {}-by-{} matrix".format(qf.size(0), qf.size(1)))
+#
+#         gf, g_pids, g_camids = [], [], []
+#         gallery_pathes = []
+#         for batch_idx, (imgs, pids, camids, img_path) in enumerate(tqdm(galleryloader)):
+#             gallery_pathes.append(img_path[0])
+#             if use_gpu:
+#                 imgs = imgs.cuda()
+#             b, n, s, c, h, w = imgs.size()
+#             imgs = imgs.view(b * n, s, c, h, w)
+#             assert (b == 1)
+#             feat_lst = []
+#             idx = 0
+#             feat = imgs
+#             if n > 16:
+#
+#                 while idx < n:
+#                     if idx + 16 > n:
+#                         end_idx = n
+#                     else:
+#                         end_idx = idx + 16
+#                     cur_img = imgs[idx:end_idx, :, :, :]
+#                     feat = model(cur_img)
+#
+#                     feat = torch.mean(feat, 0, keepdim=True)
+#                     idx += 16
+#                     feat_lst.append(feat)
+#
+#                 if len(feat_lst) > 1:
+#                     features = torch.cat(feat_lst, 0)
+#                 else:
+#                     features = feat_lst[0]
+#
+#             else:
+#                 features = model(imgs)
+#                 # features = features.view(n, -1)
+#
+#             # features = features.view(features.shape[0] * features.shape[1], -1)
+#             mu = torch.mean(features, 0, keepdim=True)
+#             # std = torch.std(features, 0, keepdim=True)
+#             # features = torch.cat((mu, std), -1)
+#             features = mu.squeeze(0)
+#
+#             features = features.data.cpu()
+#             g_pids.extend(pids)
+#             g_camids.extend(camids)
+#             gf.append(features)
+#             if batch_idx==500:
+#                 print('here')
+#             if batch_idx==1000:
+#                 print('here')
+#             del imgs
+#             del features
+#             del feat
+#             del feat_lst
+#
+#
+#         gf = torch.stack(gf)
+#         g_pids = np.asarray(g_pids)
+#         g_camids = np.asarray(g_camids)
+#
+#         np.save("gallery_pathes", gallery_pathes)
+#
+#         print("Extracted features for gallery set, obtained {}-by-{} matrix".format(gf.size(0), gf.size(1)))
+#         print("Computing distance matrix")
+#
+#         if cfg.DATASETS.NAME == "duke":
+#             print("gallary with query result:")
+#             gf = torch.cat([gf, qf], 0)
+#             g_pids = np.concatenate([g_pids, q_pids], 0)
+#             g_camids = np.concatenate([g_camids, q_camids], 0)
+#             metrics = evaluate_reranking(qf, q_pids, q_camids, gf, g_pids, g_camids, ranks)
+#         else:
+#             metrics = evaluate_reranking(qf, q_pids, q_camids, gf, g_pids, g_camids, ranks)
+#         return metrics
 
 
 if __name__ == '__main__':

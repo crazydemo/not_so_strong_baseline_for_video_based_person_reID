@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 import data_manager
 from samplers import RandomIdentitySampler
-from video_loader import VideoDataset
+from video_loader import VideoDataset, ImageDataset
 
 try:
     import apex
@@ -26,7 +26,7 @@ from tqdm import tqdm
 from lr_schedulers import WarmupMultiStepLR
 import transforms as T
 import models
-from losses import CrossEntropyLabelSmooth, TripletLoss, TripletLossAttrWeightes, CosineTripletLoss
+from losses import CrossEntropyLabelSmooth, TripletLoss, TripletLossAttrWeightes, CosineTripletLoss, Likelihood
 from utils import AverageMeter, Logger, AttributesMeter, EMA, make_optimizer
 from eval_metrics import evaluate_reranking
 from config import cfg
@@ -45,6 +45,11 @@ if args_.config_file != "":
 cfg.merge_from_list(args_.opts)
 
 tqdm_enable = False
+
+def train_collate_fn(batch):
+    imgs, pids, _, _, = zip(*batch)
+    pids = torch.tensor(pids, dtype=torch.int64)
+    return torch.stack(imgs, dim=0), pids
 
 def main():
     runId = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -141,6 +146,7 @@ def main():
     start_time = time.time()
     xent = CrossEntropyLabelSmooth(num_classes=dataset.num_train_pids)
     tent = TripletLoss(cfg.SOLVER.MARGIN)
+    lkd = Likelihood(num_classes=dataset.num_train_pids)
 
     optimizer = make_optimizer(cfg, model)
 
@@ -151,66 +157,67 @@ def main():
     best_rank1 = 0
     start_epoch = 0
     for epoch in range(start_epoch, cfg.SOLVER.MAX_EPOCHS):
-        # if no_rise == 10:
-        #     break
+        if no_rise == 10:
+            break
         scheduler.step()
         print("noriase:", no_rise)
         print("==> Epoch {}/{}".format(epoch + 1, cfg.SOLVER.MAX_EPOCHS))
         print("current lr:", scheduler.get_lr()[0])
 
-        train(model, trainloader, xent, tent, optimizer, use_gpu)
-        if cfg.SOLVER.EVAL_PERIOD > 0 and ((epoch + 1) % cfg.SOLVER.EVAL_PERIOD == 0 or (epoch + 1) == cfg.SOLVER.MAX_EPOCHS):
-            print("==> Test")
+        train(model, trainloader, xent, tent, lkd, optimizer, use_gpu)
+        # if cfg.SOLVER.EVAL_PERIOD > 0 and ((epoch + 1) % cfg.SOLVER.EVAL_PERIOD == 0 or (epoch + 1) == cfg.SOLVER.MAX_EPOCHS):
+        #     print("==> Test")
+        model.load_param('/media/ivy/research/not_so_strong_baseline_for_video_based_person_reID/experiment_res/mars/as_image/2020-02-18_22-40-25/checkpoint_ep500.pth')
+        metrics = test(model, queryloader, galleryloader, cfg.TEST.TEMPORAL_POOL_METHOD, use_gpu)
+            # rank1 = metrics[0]
+            # if rank1 > best_rank1:
+            #     best_rank1 = rank1
+            #     no_rise = 0
+            # else:
+            #     no_rise += 1
+            #     continue
 
-            metrics = test(model, queryloader, galleryloader, cfg.TEST.TEMPORAL_POOL_METHOD, use_gpu)
-            rank1 = metrics[0]
-            if rank1 > best_rank1:
-                best_rank1 = rank1
-                no_rise = 0
-            else:
-                no_rise += 1
-                continue
-
-            if use_gpu:
-                state_dict = model.module.state_dict()
-            else:
-                state_dict = model.state_dict()
-            torch.save(state_dict, osp.join(cfg.OUTPUT_DIR, "rank1_" + str(rank1) + '_checkpoint_ep' + str(epoch + 1) + '.pth'))
+            # if use_gpu:
+            #     state_dict = model.module.state_dict()
+            # else:
+            #     state_dict = model.state_dict()
+            # torch.save(state_dict, osp.join(cfg.OUTPUT_DIR, 'checkpoint_ep' + str(epoch + 1) + '.pth'))
             # best_p = osp.join(cfg.OUTPUT_DIR, "rank1_" + str(rank1) + '_checkpoint_ep' + str(epoch + 1) + '.pth')
 
-    elapsed = round(time.time() - start_time)
-    elapsed = str(datetime.timedelta(seconds=elapsed))
-    print("Finished. Total elapsed time (h:m:s): {}".format(elapsed))
+    # elapsed = round(time.time() - start_time)
+    # elapsed = str(datetime.timedelta(seconds=elapsed))
+    # print("Finished. Total elapsed time (h:m:s): {}".format(elapsed))
 
 
-def train(model, trainloader, xent, tent, optimizer, use_gpu):
+def train(model, trainloader, xent, tent, lkd, optimizer, use_gpu):
     model.train()
     xent_losses = AverageMeter()
     tent_losses = AverageMeter()
     losses = AverageMeter()
 
-
     for batch_idx, (imgs, pids, _) in enumerate(trainloader):
         if use_gpu:
             imgs, pids = imgs.cuda(), pids.cuda()
-        outputs, features = model(imgs)
+        outputs, features, mu, std, prior_mu, prior_var = model(imgs)
         # combine hard triplet loss with cross entropy loss
-
-        xent_loss = xent(outputs, pids)
-        tent_loss, _, _ = tent(features, pids)
+        likelihood, logits_with_margin = lkd(outputs, pids, a=0.0001, lamda=0.001)
+        xent_loss = xent(logits_with_margin, pids)
+        # tent_loss, _, _ = tent(features, pids)
         xent_losses.update(xent_loss.item(), 1)
-        tent_losses.update(tent_loss.item(), 1)
-        loss = xent_loss + tent_loss
+        # tent_losses.update(tent_loss.item(), 1)
+
+        loss = xent_loss + likelihood#+ tent_loss
         optimizer.zero_grad()
-        loss.backward()
+        loss.backward(retain_graph=True)
         optimizer.step()
         losses.update(loss.item(), 1)
         acc = (outputs.max(1)[1] == pids).float().mean()
         score = outputs[:,pids]
-
-        print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f}), acc: {:.3f}, scores: {:.4f}".format(
+        tent_losses = losses
+        print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f}), lkd: {:.6f}, acc: {:.3f}, \
+        \n \t\t\t\tmu: {:.4f}, std:{:.4f}, prior_mu: {:.4f}, prior_var: {:.4f}, scores: {:.4f}".format(
             batch_idx + 1, len(trainloader), losses.val, losses.avg, xent_losses.val, xent_losses.avg, tent_losses.val,
-            tent_losses.avg, acc.item(), score.mean()))
+            tent_losses.avg, likelihood.item(), acc.item(), mu.mean(), std.mean(), prior_mu.mean(), prior_var.mean(), score.mean()))
 
         # attr_losses.update(attr_loss.item(), pids.size(0))
     print("Batch {}/{}\t Loss {:.6f} ({:.6f}) xent Loss {:.6f} ({:.6f}), tent Loss {:.6f} ({:.6f})".format(
@@ -261,11 +268,12 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
                 features = model(imgs)
                 # features = features.view(n, -1)
 
-            # features = features.view(features.shape[0]*features.shape[1], -1)
-            mu = torch.mean(features, 0, keepdim=True)
+            features = features.view(features.shape[0]*features.shape[1], -1)
+            # mu = torch.mean(features, 0, keepdim=True)
             # std = torch.std(features, 0, keepdim=True)
             # features = torch.cat((mu, std), -1)
-            features = mu.squeeze(0)
+            # features = features.squeeze(0)
+            features = features.mean(0)
 
             features = features.data.cpu()
 
@@ -325,11 +333,12 @@ def test(model, queryloader, galleryloader, pool, use_gpu, ranks=[1, 5, 10, 20])
                 features = model(imgs)
                 # features = features.view(n, -1)
 
-            # features = features.view(features.shape[0] * features.shape[1], -1)
-            mu = torch.mean(features, 0, keepdim=True)
+            features = features.view(features.shape[0] * features.shape[1], -1)
+            # mu = torch.mean(features, 0, keepdim=True)
             # std = torch.std(features, 0, keepdim=True)
             # features = torch.cat((mu, std), -1)
-            features = mu.squeeze(0)
+            # features = features.squeeze(0)
+            features = features.mean(0)
 
             features = features.data.cpu()
             g_pids.extend(pids)
