@@ -35,6 +35,25 @@ def weights_init_classifier(m):
             nn.init.constant_(m.bias, 0.0)
 
 
+def KL_between_multivariate_gaussian(z_mu, z_var, c_mu, c_var):
+    epsi = 1e-6
+
+    det_z_var = torch.prod(z_var,1)
+    det_c_var = torch.prod(c_var,1)
+    inverse_c_var = 1 / (c_var+epsi)
+
+    det_term = torch.unsqueeze(torch.log(det_c_var+epsi), 0) - torch.unsqueeze(torch.log(det_z_var+epsi), 1) #batchsize, num_class
+    trace_term = torch.mm(z_var, inverse_c_var.t())#batchsize, num_class
+    z_mu = torch.unsqueeze(z_mu, 1)
+    c_mu = torch.unsqueeze(c_mu, 0)
+    c_var = torch.unsqueeze(c_var, 0)
+    diff = (z_mu-c_mu)**2
+    m_dist_term = torch.sum(diff / (c_var+epsi), -1)#batchsize, num_class
+
+    KL_divergence = 0.5*(det_term+trace_term+m_dist_term)
+    return KL_divergence
+
+
 class AttributeRecogModule(nn.Module):
     def __init__(self, in_planes, num_class):
         super(AttributeRecogModule, self).__init__()
@@ -118,6 +137,89 @@ class MultiAttributeRecogModuleBCE(nn.Module):
         else:
             y = None
         return y, atten
+
+
+class SigmaNet(nn.Module):
+    def __init__(self, in_planes=2048):
+        super(SigmaNet, self).__init__()
+        self.in_planes = in_planes
+        self.posterior_log_sigma1 = nn.Conv2d(self.in_planes, 512, kernel_size=1, stride=1, padding=0,
+                                              bias=False)
+        self.bn1 = nn.BatchNorm2d(512)
+        self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
+        self.posterior_log_sigma2 = nn.Conv2d(self.in_planes, 512, kernel_size=1, stride=1, padding=0,
+                                              bias=False)
+        self.bn2 = nn.BatchNorm2d(512)
+        self.posterior_log_sigma = nn.Linear(512, self.in_planes, bias=True)
+
+        self.shortcut = nn.Conv2d(self.in_planes, self.in_planes, kernel_size=1, stride=1, padding=0, bias=False)
+
+        self.softplus = nn.Softplus()
+
+        self.posterior_log_sigma1.apply(weights_init_classifier)
+        self.posterior_log_sigma2.apply(weights_init_classifier)
+        self.posterior_log_sigma.apply(weights_init_classifier)
+        self.shortcut.apply(weights_init_classifier)
+
+        self.bottleneck_mu = nn.BatchNorm1d(self.in_planes)
+        self.bottleneck_mu.bias.requires_grad_(False)  # no shift
+        self.bottleneck_var = nn.BatchNorm1d(self.in_planes)
+        self.bottleneck_var.bias.requires_grad_(False)  # no shift
+
+        self.bn1.apply(weights_init_kaiming)
+        self.bn2.apply(weights_init_kaiming)
+
+        self.gap = nn.AdaptiveAvgPool2d(1)
+
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
+        self.f_reduction = nn.Conv2d(self.in_planes, 512, kernel_size=1, stride=1, padding=0,
+                                     bias=False)
+        self.f_bn = nn.BatchNorm2d(512)
+        self.f_reduction.apply(weights_init_classifier)
+        self.f_bn.apply(weights_init_kaiming)
+
+        self.spatial_dropout = nn.Dropout2d(0.5)
+
+    def forward(self,x):
+        posterior_log_sigma1 = self.posterior_log_sigma1(x)
+        posterior_log_sigma1 = self.bn1(posterior_log_sigma1)
+        posterior_log_sigma1 = self.tanh(posterior_log_sigma1)
+        posterior_log_sigma2 = self.posterior_log_sigma2(x)
+        posterior_log_sigma2 = self.bn2(posterior_log_sigma2)
+        posterior_log_sigma2 = self.tanh(posterior_log_sigma2)
+
+        f_max1 = self.maxpool(posterior_log_sigma1)
+        f_min1 = -1 * self.maxpool(-1 * posterior_log_sigma1)
+        f_max2 = self.maxpool(posterior_log_sigma2)
+        f_min2 = -1 * self.maxpool(-1 * posterior_log_sigma2)
+        f = []
+        f.append(f_max1 * f_max2)
+        f.append(f_max1 * f_min2)
+        f.append(f_min1 * f_min2)
+        f.append(f_min1 * f_max2)
+        f = torch.cat(f, 1)
+
+        f = self.spatial_dropout(f)
+
+        f = self.f_reduction(f)
+        f = self.f_bn(f)
+        f = self.relu(f)
+        posterior_log_sigma = f
+
+        posterior_log_sigma = self.gap(posterior_log_sigma)
+        posterior_log_sigma = posterior_log_sigma.view(x.shape[0], -1)
+
+        sigma_shortcut = self.shortcut(x)
+        sigma_shortcut = self.gap(sigma_shortcut)
+        sigma_shortcut = sigma_shortcut.view(x.shape[0], -1)
+
+        posterior_log_sigma = self.posterior_log_sigma(posterior_log_sigma)
+        posterior_log_sigma = posterior_log_sigma + sigma_shortcut
+
+        return posterior_log_sigma
+
+
 
 class VideoBaseline(nn.Module):
     in_planes = 2048
@@ -223,53 +325,74 @@ class VideoBaseline(nn.Module):
         self.neck_feat = neck_feat
         # self.attention_conv = nn.Conv2d(self.in_planes, 1, 3, padding=1)
         # weights_init_kaiming(self.attention_conv)
-        if self.neck == 'no':
-            self.classifier = nn.Linear(self.in_planes, self.num_classes)
-            # self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)     # new add by luo
-            self.classifier.apply(weights_init_classifier)  # new add by luo
-        elif self.neck == 'bnneck':
-            self.bottleneck = nn.BatchNorm1d(self.in_planes)
-            self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)
-            self.bottleneck.bias.requires_grad_(False)  # no shift
-            self.bottleneck.apply(weights_init_kaiming)
-            self.classifier.apply(weights_init_classifier)
 
+        self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)     # new add by luo
+        self.classifier.apply(weights_init_classifier)  # new add by luo
 
-    def forward(self, x):
+        self.bottleneck_mu = nn.BatchNorm1d(self.in_planes)
+        self.bottleneck_mu.bias.requires_grad_(False)  # no shift
+        self.bottleneck_mu.apply(weights_init_kaiming)
+
+        self.bottleneck_std = nn.BatchNorm1d(self.in_planes)
+        self.bottleneck_std.bias.requires_grad_(False)  # no shift
+        self.bottleneck_std.apply(weights_init_kaiming)
+
+        self.prior_mu = nn.Parameter(torch.randn(self.num_classes, self.in_planes).cuda())
+        nn.init.kaiming_normal_(self.prior_mu, a=0, mode='fan_in')
+        self.prior_log_sigma = nn.Parameter(torch.ones(self.num_classes, self.in_planes).cuda())
+        self.softplus = nn.Softplus()
+        self.sigmanet = SigmaNet()
+        self.reduction_sigma = nn.Conv2d(self.in_planes*4, 2048, kernel_size=1, stride=1, padding=0,
+                                              bias=False)
+        self.reduction_sigma.apply(weights_init_classifier)
+        # self.reduction_bn = nn.BatchNorm2d(2048)
+        # self.relu = nn.ReLU()
+
+    def forward(self, x, max_feat=None, cnt=None):
         b = x.size(0)
         t = x.size(1)
         x = x.view(b * t, x.size(2), x.size(3), x.size(4))
-        global_feat = self.base(x) # (b, 2048, 1, 1)
+        feature_map = self.base(x)  # (b, 2048, 1, 1)
 
-        # a = self.attention_conv(global_feat)
-        # a = a.view(b, t, 1, global_feat.size(2), global_feat.size(3))
-        # a = torch.sigmoid(a)
-        # a = a.expand(b, t, self.in_planes, global_feat.size(2), global_feat.size(3))
-        #
-        global_feat = global_feat.view(b, t, self.in_planes, global_feat.size(2), global_feat.size(3))
-        global_feat = torch.max(global_feat, 1)[0]
-        # global_feat = global_feat.view(b * t, self.in_planes, global_feat.size(3), global_feat.size(4))
-        global_feat= self.gap(global_feat)
-        # global_feat = global_feat.view(b, t, -1)
-        # global_feat = global_feat.permute(0, 2, 1)
-        # global_feat = torch.mean(global_feat, 2, keepdim=True)
-        global_feat = global_feat.view(b, -1)
+        global_feat = self.gap(feature_map)
+        global_feat = global_feat.view(b, t, -1)
+        mu = torch.mean(global_feat, 1)
+        mu_for_ce = self.bottleneck_mu(mu)
+        prior_mu = self.prior_mu
+        prior_sigma = self.softplus(self.prior_log_sigma * 0.54)
 
-        if self.neck == 'no':
-            feat = global_feat
-        elif self.neck == 'bnneck':
-            feat = self.bottleneck(global_feat)  # normalize for angular softmax
-
-        feat = feat#.squeeze(2)
-        global_feat = global_feat#.squeeze(2)
         if self.training:
-            cls_score = self.classifier(feat)
-            return cls_score, global_feat  # global feature for triplet loss
+            feat = feature_map.view(b, t, 2048, 16, 8)
+            feature_for_sigma = torch.max(feat, 1)[0]
+
+            log_sigma = self.sigmanet(feature_for_sigma)
+            std = self.softplus(log_sigma)
+            std_for_ce = self.bottleneck_std(log_sigma)
+            std_for_ce = self.softplus(std_for_ce)
+
+            feat = torch.cat((mu, torch.sqrt(std+1e-6)), -1)
+
+            cls_score = -KL_between_multivariate_gaussian(mu_for_ce, std_for_ce, prior_mu, prior_sigma)
+            return cls_score, feat, mu, std, prior_mu, prior_sigma  # global feature for triplet loss
         else:
-            if self.neck_feat == 'after':
-                return feat
-            else:
-                return global_feat
+            if cnt == 0:
+                feat = feature_map.view(b, t, 2048, 16, 8)
+                max_feat = torch.max(feat, 1)[0]
+            log_sigma = self.sigmanet(max_feat)
+            std = self.softplus(log_sigma)
+            std_for_ce = self.bottleneck_std(log_sigma)
+            std_for_ce = self.softplus(std_for_ce)
+            # feat_for_test = torch.cat((mu_for_ce, std_for_ce), 1)
+            return max_feat, mu, torch.sqrt(std+1e-6)
+
+
+            # feat = feature_map.view(b, t * 2048, 16, 8)
+            # # feature_for_sigma = torch.max(feat, 1)[0]
+            # feature_for_sigma = self.reduction_sigma(feat)
+            # log_sigma = self.sigmanet(feature_for_sigma)
+            # std = self.softplus(log_sigma)
+            # feature = torch.cat((mu, torch.sqrt(std+1e-6)), -1)
+            # return feature
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path)
